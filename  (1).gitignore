@@ -1,0 +1,6 @@
+# Never commit these
+secrets.yaml
+.esphome/
+*.bin
+__pycache__/
+.DS_Store
