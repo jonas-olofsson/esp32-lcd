@@ -3,6 +3,11 @@ substitutions:
   # Meter ID in the form <serial>_<mpan>, kept in secrets.yaml (it identifies your supply).
   # The Octopus entity IDs below are built from it.
   octopus_meter_id: !secret octopus_meter_id
+  # Gas meter ID in the form <serial>_<mprn>, also kept in secrets.yaml
+  octopus_gas_meter_id: !secret octopus_gas_meter_id
+  # Gas totals: "previous" = yesterday (works with any smart meter);
+  # "current" = today so far (needs an Octopus Home Mini)
+  gas_period: current
   # Backlight turns off after this long without a touch or motion; either wakes it
   screen_timeout: 60s
   # Full scale (the end of the ring, 340 degrees) = this many watts
@@ -227,6 +232,12 @@ font:
     size: 24
     bpp: 4
     glyphs: "£0123456789.,-"
+  # Icon font: Material Design Icons (mdi:fire = U+F0238, mdi:flash = U+F0241)
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/v7.4.47/fonts/materialdesignicons-webfont.ttf"
+    id: font_icons
+    size: 28
+    bpp: 4
+    glyphs: ["\U000F0238", "\U000F0241"]
 
 lvgl:
   id: my_lvgl
@@ -390,10 +401,17 @@ lvgl:
             text_color: 0xB0B5BD
             text_font: montserrat_24
         - label:
+            text: "\U000F0241"
+            align: CENTER
+            x: -105
+            y: 75
+            text_color: 0xFFD400
+            text_font: font_icons
+        - label:
             id: today_kwh_label
             text: "-- kWh"
             align: CENTER
-            x: -80
+            x: -35
             y: 75
             text_color: 0xFFFFFF
             text_font: montserrat_24
@@ -401,8 +419,31 @@ lvgl:
             id: today_cost_label
             text: "£--"
             align: CENTER
-            x: 80
+            x: 75
             y: 75
+            text_color: 0xFFFFFF
+            text_font: font_cost
+        - label:
+            text: "\U000F0238"
+            align: CENTER
+            x: -105
+            y: 120
+            text_color: 0xFF7A1A
+            text_font: font_icons
+        - label:
+            id: gas_kwh_label
+            text: "-- kWh"
+            align: CENTER
+            x: -35
+            y: 120
+            text_color: 0xFFFFFF
+            text_font: montserrat_24
+        - label:
+            id: gas_cost_label
+            text: "£--"
+            align: CENTER
+            x: 75
+            y: 120
             text_color: 0xFFFFFF
             text_font: font_cost
         - label:
@@ -507,6 +548,31 @@ sensor:
       then:
         - lvgl.label.update:
             id: today_cost_label
+            text: !lambda |-
+              if (std::isnan(x)) return std::string("£--");
+              return str_sprintf("£%.2f", x);
+
+  # Gas (daily total and cost). Entity IDs end in the unit for consumption.
+  - platform: homeassistant
+    id: gas_kwh
+    entity_id: sensor.octopus_energy_gas_${octopus_gas_meter_id}_${gas_period}_accumulative_consumption_kwh
+    internal: true
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: gas_kwh_label
+            text: !lambda |-
+              if (std::isnan(x)) return std::string("-- kWh");
+              return str_sprintf("%.1f kWh", x);
+
+  - platform: homeassistant
+    id: gas_cost
+    entity_id: sensor.octopus_energy_gas_${octopus_gas_meter_id}_${gas_period}_accumulative_cost
+    internal: true
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: gas_cost_label
             text: !lambda |-
               if (std::isnan(x)) return std::string("£--");
               return str_sprintf("£%.2f", x);
