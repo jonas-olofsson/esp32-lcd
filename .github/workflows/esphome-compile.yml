@@ -1,0 +1,72 @@
+name: ESPHome compile
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: esphome-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep this in step with the ESPHome version in your Device Builder
+  ESPHOME_VERSION: "2026.10.1"
+  CONFIG_FILE: hass-display.yaml
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ env.ESPHOME_VERSION }}
+          restore-keys: platformio-${{ runner.os }}-
+
+      - name: Install ESPHome
+        run: |
+          python -m pip install --upgrade pip
+          pip install "esphome==${ESPHOME_VERSION}"
+          esphome version
+
+      - name: Check secrets.yaml.example lists every secret the config uses
+        run: |
+          missing=0
+          for key in $(grep -o '!secret [A-Za-z0-9_]*' "$CONFIG_FILE" | awk '{print $2}' | sort -u); do
+            if ! grep -q "^${key}:" secrets.yaml.example; then
+              echo "::error::'${key}' is used in ${CONFIG_FILE} but missing from secrets.yaml.example"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Create dummy secrets.yaml (never committed, fake values only)
+        run: |
+          cat > secrets.yaml <<EOT
+          wifi_ssid: "ci-test-network"
+          wifi_password: "ci-test-password"
+          api_key: "$(openssl rand -base64 32)"
+          ap_password: "ci-test-fallback"
+          octopus_meter_id: "0000000000_0000000000000"
+          octopus_gas_meter_id: "0000000000_0000000"
+          EOT
+
+      - name: Validate config
+        run: esphome config "$CONFIG_FILE"
+
+      - name: Compile firmware
+        run: esphome compile "$CONFIG_FILE"
