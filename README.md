@@ -7,6 +7,7 @@ Octopus Energy data from Home Assistant:
 - Live usage (W/kW) as a progress ring that fills to a configurable maximum
 - Today's usage (kWh) and cost so far
 - Backlight timeout, woken by touch or a Home Assistant motion sensor
+- A second page with just the logo; swipe left or right to switch pages
 
 ## Requirements
 
@@ -17,9 +18,10 @@ Octopus Energy data from Home Assistant:
 ## Setup
 
 1. Copy `secrets.yaml.example` to `secrets.yaml` and fill in your values.
-2. Edit the entity ID of your motion sensor near the bottom of `hass-display.yaml`.
-3. Adjust the substitutions at the top (timeout, ring maximum, colour thresholds).
-4. Compile and install with ESPHome, then add the device in Home Assistant
+2. Keep `octopus.png` in the same folder as `hass-display.yaml` (it's the logo; swap in your own artwork if you like).
+3. Edit the entity ID of your motion sensor near the bottom of `hass-display.yaml`.
+4. Adjust the substitutions at the top (timeout, ring maximum, colour thresholds).
+5. Compile and install with ESPHome, then add the device in Home Assistant
    (Settings > Devices & services > ESPHome).
 
 `secrets.yaml` is git-ignored. Do not commit it.

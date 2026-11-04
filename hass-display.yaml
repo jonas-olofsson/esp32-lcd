@@ -3,6 +3,17 @@ substitutions:
   # Meter ID in the form <serial>_<mpan>, kept in secrets.yaml (it identifies your supply).
   # The Octopus entity IDs below are built from it.
   octopus_meter_id: !secret octopus_meter_id
+  # Gas meter ID in the form <serial>_<mprn>, also kept in secrets.yaml
+  octopus_gas_meter_id: !secret octopus_gas_meter_id
+  # Gas totals: "previous" = yesterday (works with any smart meter);
+  # "current" = today so far (needs an Octopus Home Mini)
+  gas_period: current
+  # Palette (approximation of the Octopus Energy look: deep navy-purple and hot pink)
+  color_bg: "0x100030"      # background
+  color_pink: "0xF050F8"    # brand accent (icons)
+  color_track: "0x2A1466"   # dim ring track
+  color_muted: "0x9A8CC4"   # secondary text and idle ring
+  color_soft: "0xD9CEF5"    # tertiary text (costs)
   # Backlight turns off after this long without a touch or motion; either wakes it
   screen_timeout: 60s
   # Full scale (the end of the ring, 340 degrees) = this many watts
@@ -26,6 +37,8 @@ esp32:
   flash_size: 16MB
   framework:
     type: esp-idf
+    advanced:
+      flash_chip: generic   # saves IRAM, as suggested by the boot log
     sdkconfig_options:
       CONFIG_ESPTOOLPY_FLASHFREQ_80M: "y"
       CONFIG_ESPTOOLPY_FLASHMODE_QIO: "y"
@@ -57,6 +70,7 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: none   # avoids display glitches from Wi-Fi sleep/wake bursts
   ap:
     ssid: Hass Display Fallback Hotspot
     password: !secret ap_password
@@ -78,7 +92,7 @@ output:
   - platform: ledc
     id: gpio_backlight_pwm
     pin: GPIO6
-    frequency: 1000Hz
+    frequency: 5000Hz   # high enough to avoid beating against the panel refresh
 
 light:
   - platform: monochromatic
@@ -112,6 +126,32 @@ touchscreen:
                   id: display_backlight
                   transition_length: 200ms
         - script.execute: screen_timeout_script
+    on_update:
+      then:
+        # A finished touch (state 6) that moved mostly sideways by more than 80px is a swipe
+        - lambda: |-
+            for (auto touch : touches) {
+              if (touch.state == 6) {
+                int dx = (int) touch.x_prev - (int) touch.x_org;
+                int dy = (int) touch.y_prev - (int) touch.y_org;
+                if (abs(dx) > 80 && abs(dx) > 2 * abs(dy)) id(swipe_dir) = (dx < 0) ? 1 : 2;
+              }
+            }
+        - if:
+            condition:
+              lambda: 'return id(swipe_dir) == 1;'
+            then:
+              - lvgl.page.next:
+                  animation: MOVE_LEFT
+                  time: 300ms
+        - if:
+            condition:
+              lambda: 'return id(swipe_dir) == 2;'
+            then:
+              - lvgl.page.previous:
+                  animation: MOVE_RIGHT
+                  time: 300ms
+        - lambda: 'id(swipe_dir) = 0;'
 
 spi:
   - id: spi_lcd
@@ -140,7 +180,7 @@ display:
     hsync_pin: GPIO38
     vsync_pin: GPIO39
     pclk_pin: GPIO41
-    pclk_frequency: 16MHz
+    pclk_frequency: 14MHz   # tuning for shimmer: was 16MHz, tried 12MHz
     pclk_inverted: false
     hsync_pulse_width: 8
     hsync_back_porch: 10
@@ -227,6 +267,27 @@ font:
     size: 24
     bpp: 4
     glyphs: "£0123456789.,-"
+  # Icon font: Material Design Icons (mdi:fire = U+F0238, mdi:flash = U+F0241)
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/v7.4.47/fonts/materialdesignicons-webfont.ttf"
+    id: font_icons
+    size: 28
+    bpp: 4
+    glyphs: ["\U000F0238", "\U000F0241"]
+
+# Octopus artwork, downloaded from the GitHub repo at compile time (needs internet)
+image:
+  - platform: file
+    file: "https://raw.githubusercontent.com/jonas-olofsson/esp32-lcd/main/octopus.png"
+    id: octo_small
+    resize: 48x48
+    type: RGB565
+    transparency: alpha_channel
+  - platform: file
+    file: "https://raw.githubusercontent.com/jonas-olofsson/esp32-lcd/main/octopus.png"
+    id: octo_big
+    resize: 220x220
+    type: RGB565
+    transparency: alpha_channel
 
 lvgl:
   id: my_lvgl
@@ -235,9 +296,9 @@ lvgl:
     - touchscreen_id: my_touchscreen
   pages:
     - id: main_page
-      bg_color: 0x0A0A0F
+      bg_color: ${color_bg}
       widgets:
-        # Usage ring: runs from 20 to 340 degrees (gap at the bottom for the usage text), full scale = ring_max_w, with an inward glow
+        # Usage ring: runs from 20 to 340 degrees (gap at the bottom for the usage text), full scale = ring_max_w
         - arc:
             id: usage_arc
             align: CENTER
@@ -253,158 +314,137 @@ lvgl:
             clickable: false
             arc_width: 20
             arc_rounded: false
-            arc_color: 0x26262E   # dim track
+            arc_color: ${color_track}   # dim track
             indicator:
               arc_width: 20
               arc_rounded: false
-              arc_color: 0x444444
-        - arc:
-            id: usage_glow_1
+              arc_color: ${color_muted}
+        - image:
+            src: octo_small
             align: CENTER
-            width: 440
-            height: 440
-            min_value: 0
-            max_value: ${ring_max_w}
-            value: 0
-            start_angle: 20
-            end_angle: 340
-            rotation: 90          # 0 at the bottom, fills clockwise
-            adjustable: false
+            y: -140
+        # Daily electricity usage: the main focus
+        - obj:
+            id: elec_row
+            align: CENTER
+            y: -70
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
             clickable: false
-            arc_width: 10
-            arc_rounded: false
-            arc_opa: TRANSP
-            indicator:
-              arc_width: 10
-              arc_rounded: false
-              arc_color: 0x444444
-              arc_opa: 60%
-        - arc:
-            id: usage_glow_2
-            align: CENTER
-            width: 420
-            height: 420
-            min_value: 0
-            max_value: ${ring_max_w}
-            value: 0
-            start_angle: 20
-            end_angle: 340
-            rotation: 90          # 0 at the bottom, fills clockwise
-            adjustable: false
-            clickable: false
-            arc_width: 10
-            arc_rounded: false
-            arc_opa: TRANSP
-            indicator:
-              arc_width: 10
-              arc_rounded: false
-              arc_color: 0x444444
-              arc_opa: 42%
-        - arc:
-            id: usage_glow_3
-            align: CENTER
-            width: 400
-            height: 400
-            min_value: 0
-            max_value: ${ring_max_w}
-            value: 0
-            start_angle: 20
-            end_angle: 340
-            rotation: 90          # 0 at the bottom, fills clockwise
-            adjustable: false
-            clickable: false
-            arc_width: 10
-            arc_rounded: false
-            arc_opa: TRANSP
-            indicator:
-              arc_width: 10
-              arc_rounded: false
-              arc_color: 0x444444
-              arc_opa: 28%
-        - arc:
-            id: usage_glow_4
-            align: CENTER
-            width: 380
-            height: 380
-            min_value: 0
-            max_value: ${ring_max_w}
-            value: 0
-            start_angle: 20
-            end_angle: 340
-            rotation: 90          # 0 at the bottom, fills clockwise
-            adjustable: false
-            clickable: false
-            arc_width: 10
-            arc_rounded: false
-            arc_opa: TRANSP
-            indicator:
-              arc_width: 10
-              arc_rounded: false
-              arc_color: 0x444444
-              arc_opa: 16%
-        - arc:
-            id: usage_glow_5
-            align: CENTER
-            width: 360
-            height: 360
-            min_value: 0
-            max_value: ${ring_max_w}
-            value: 0
-            start_angle: 20
-            end_angle: 340
-            rotation: 90          # 0 at the bottom, fills clockwise
-            adjustable: false
-            clickable: false
-            arc_width: 10
-            arc_rounded: false
-            arc_opa: TRANSP
-            indicator:
-              arc_width: 10
-              arc_rounded: false
-              arc_color: 0x444444
-              arc_opa: 8%
-        - label:
-            text: "Octopus Energy"
-            align: TOP_MID
-            y: 68
-            text_color: 0xF050F8
-            text_font: montserrat_24
-        - label:
-            id: rate_label
-            text: "--"
-            align: CENTER
-            y: -50
-            text_color: 0xFFFFFF
-            text_font: montserrat_48
-        - label:
-            text: "p/kWh now"
+            layout:
+              type: flex
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              flex_align_track: CENTER
+            widgets:
+              - label:
+                  text: "\U000F0241"
+                  text_color: ${color_pink}
+                  text_font: font_icons
+              - label:
+                  pad_left: 10
+                  id: today_kwh_label
+                  text: "--"
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_40
+              - label:
+                  pad_left: 10
+                  text: "kWh"
+                  text_color: ${color_muted}
+                  text_font: montserrat_20
+              - label:
+                  pad_left: 10
+                  id: today_cost_label
+                  text: "£--"
+                  text_color: ${color_soft}
+                  text_font: font_cost
+        # Daily gas usage and cost
+        - obj:
+            id: gas_row
             align: CENTER
             y: 0
-            text_color: 0x8A8F98
-            text_font: montserrat_24
-        - label:
-            id: next_label
-            text: "Next: --"
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            layout:
+              type: flex
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              flex_align_track: CENTER
+            widgets:
+              - label:
+                  text: "\U000F0238"
+                  text_color: ${color_pink}
+                  text_font: font_icons
+              - label:
+                  pad_left: 10
+                  id: gas_kwh_label
+                  text: "--"
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_40
+              - label:
+                  pad_left: 10
+                  text: "kWh"
+                  text_color: ${color_muted}
+                  text_font: montserrat_20
+              - label:
+                  pad_left: 10
+                  id: gas_cost_label
+                  text: "£--"
+                  text_color: ${color_soft}
+                  text_font: font_cost
+        # Electricity price: small, below the gas row
+        - obj:
+            id: price_row
             align: CENTER
-            y: 30
-            text_color: 0xB0B5BD
-            text_font: montserrat_24
+            y: 70
+            width: SIZE_CONTENT
+            height: SIZE_CONTENT
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            clickable: false
+            layout:
+              type: flex
+              flex_flow: ROW
+              flex_align_main: CENTER
+              flex_align_cross: CENTER
+              flex_align_track: CENTER
+            widgets:
+              - label:
+                  text: "\U000F0241"
+                  text_color: ${color_pink}
+                  text_font: font_icons
+              - label:
+                  pad_left: 12
+                  id: rate_label
+                  text: "--"
+                  text_color: 0xFFFFFF
+                  text_font: montserrat_28
+              - label:
+                  pad_left: 12
+                  id: next_label
+                  text: "next --"
+                  text_color: ${color_muted}
+                  text_font: montserrat_16
         - label:
-            id: today_kwh_label
-            text: "-- kWh"
-            align: CENTER
-            x: -80
-            y: 75
-            text_color: 0xFFFFFF
-            text_font: montserrat_24
-        - label:
-            id: today_cost_label
-            text: "£--"
-            align: CENTER
-            x: 80
-            y: 75
-            text_color: 0xFFFFFF
-            text_font: font_cost
+            id: export_label
+            text: ""
+            align: BOTTOM_MID
+            y: -50
+            text_color: 0x00E5FF
+            text_font: montserrat_14
         - label:
             id: usage_label
             text: "-- W"
@@ -412,6 +452,13 @@ lvgl:
             y: -14
             text_color: 0xFFFFFF
             text_font: montserrat_28
+    # Page 2: just the logo. Swipe left or right to switch pages.
+    - id: logo_page
+      bg_color: ${color_bg}
+      widgets:
+        - image:
+            src: octo_big
+            align: CENTER
 
 sensor:
   # The integration reports GBP/kWh, so values are multiplied by 100 for pence
@@ -427,12 +474,12 @@ sensor:
             id: rate_label
             text: !lambda |-
               if (std::isnan(x)) return std::string("--");
-              return str_sprintf("%.1f", x * 100.0f);
+              return str_sprintf("%.1fp", x * 100.0f);
         # Colour by price: cyan = negative, green = cheap, white = normal, orange/red = expensive
         - lvgl.widget.update:
             id: rate_label
             text_color: !lambda |-
-              if (std::isnan(x)) return lv_color_hex(0x8A8F98);
+              if (std::isnan(x)) return lv_color_hex(${color_muted});
               float p = x * 100.0f;
               if (p < 0) return lv_color_hex(0x00E5FF);
               if (p < 15) return lv_color_hex(0x2ECC71);
@@ -451,37 +498,50 @@ sensor:
         - lvgl.label.update:
             id: next_label
             text: !lambda |-
-              if (std::isnan(x)) return std::string("Next: --");
-              return str_sprintf("Next: %.1fp", x * 100.0f);
+              if (std::isnan(x)) return std::string("next --");
+              return str_sprintf("next %.1fp", x * 100.0f);
 
-  # Live usage in watts: drives the usage text and the coloured edge
+  # Live usage in watts. Positive = importing: the ring fills from its start (bottom left).
+  # Negative = exporting: the ring fills from the opposite end (bottom right) in cyan,
+  # and an EXPORTING caption appears above the number.
   - platform: homeassistant
     id: octo_usage
     entity_id: sensor.octopus_energy_electricity_${octopus_meter_id}_current_demand
     internal: true
+    filters:
+      - throttle: 2s     # at most one redraw every 2 seconds
+      - delta: 10        # ignore changes smaller than 10 W
     on_value:
       then:
         - lvgl.label.update:
             id: usage_label
             text: !lambda |-
               if (std::isnan(x)) return std::string("-- W");
-              if (x >= 1000) return str_sprintf("%.2f kW", x / 1000.0f);
-              return str_sprintf("%.0f W", x);
+              float a = fabsf(x);
+              if (a >= 1000) return str_sprintf("%.2f kW", a / 1000.0f);
+              return str_sprintf("%.0f W", a);
+        - lvgl.label.update:
+            id: export_label
+            text: !lambda |-
+              return std::string((!std::isnan(x) && x < 0) ? "EXPORTING" : "");
         - lambda: |-
+            bool exporting = !std::isnan(x) && x < 0;
             lv_color_t c;
-            if (std::isnan(x)) c = lv_color_hex(0x444444);
+            if (std::isnan(x)) c = lv_color_hex(${color_muted});
+            else if (exporting) c = lv_color_hex(0x00E5FF);
             else if (x >= ${usage_red_w}) c = lv_color_hex(0xFF2D2D);
             else if (x >= ${usage_amber_w}) c = lv_color_hex(0xFFA500);
             else c = lv_color_hex(0x2ECC71);
-            int v = std::isnan(x) ? 0 : (int) x;
-            lv_obj_t *arcs[] = {id(usage_arc), id(usage_glow_1), id(usage_glow_2),
-                                id(usage_glow_3), id(usage_glow_4), id(usage_glow_5)};
-            for (lv_obj_t *a : arcs) {
-              lv_arc_set_value(a, v);
-              lv_obj_set_style_arc_color(a, c, LV_PART_INDICATOR);
-            }
+            int mag = std::isnan(x) ? 0 : (int) fabsf(x);
+            if (mag > ${ring_max_w}) mag = ${ring_max_w};
+            lv_obj_t *a = id(usage_arc);
+            // REVERSE fills from the end of the arc backwards, so value = max - export
+            lv_arc_set_mode(a, exporting ? LV_ARC_MODE_REVERSE : LV_ARC_MODE_NORMAL);
+            lv_arc_set_value(a, exporting ? ${ring_max_w} - mag : mag);
+            lv_obj_set_style_arc_color(a, c, LV_PART_INDICATOR);
             lv_color_t t = lv_color_hex(0xFFFFFF);
-            if (std::isnan(x)) t = lv_color_hex(0x8A8F98);
+            if (std::isnan(x)) t = lv_color_hex(${color_muted});
+            else if (exporting) t = lv_color_hex(0x00E5FF);
             else if (x >= ${usage_red_w}) t = lv_color_hex(0xFF2D2D);
             else if (x >= ${usage_amber_w}) t = lv_color_hex(0xFFA500);
             lv_obj_set_style_text_color(id(usage_label), t, 0);
@@ -496,8 +556,8 @@ sensor:
         - lvgl.label.update:
             id: today_kwh_label
             text: !lambda |-
-              if (std::isnan(x)) return std::string("-- kWh");
-              return str_sprintf("%.1f kWh", x);
+              if (std::isnan(x)) return std::string("--");
+              return str_sprintf("%.1f", x);
 
   - platform: homeassistant
     id: octo_today_cost
@@ -510,6 +570,37 @@ sensor:
             text: !lambda |-
               if (std::isnan(x)) return std::string("£--");
               return str_sprintf("£%.2f", x);
+
+  # Gas (daily total and cost). Entity IDs end in the unit for consumption.
+  - platform: homeassistant
+    id: gas_kwh
+    entity_id: sensor.octopus_energy_gas_${octopus_gas_meter_id}_${gas_period}_accumulative_consumption_kwh
+    internal: true
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: gas_kwh_label
+            text: !lambda |-
+              if (std::isnan(x)) return std::string("--");
+              return str_sprintf("%.1f", x);
+
+  - platform: homeassistant
+    id: gas_cost
+    entity_id: sensor.octopus_energy_gas_${octopus_gas_meter_id}_${gas_period}_accumulative_cost
+    internal: true
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: gas_cost_label
+            text: !lambda |-
+              if (std::isnan(x)) return std::string("£--");
+              return str_sprintf("£%.2f", x);
+
+globals:
+  # Set by the swipe detector: 0 = none, 1 = swiped left, 2 = swiped right
+  - id: swipe_dir
+    type: int
+    initial_value: '0'
 
 script:
   # Turns the backlight off after the timeout, unless motion is still detected.
